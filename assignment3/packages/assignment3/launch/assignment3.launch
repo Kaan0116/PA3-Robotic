@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <launch>
-  <arg name="veh" default="$(optenv VEHICLE_NAME autobot01)"/>
+  <arg name="veh" default="$(optenv VEHICLE_NAME bear)"/>
 
   <node pkg="assignment3" type="navigator_node.py" name="assignment3_navigator" output="screen" required="true">
     <param name="robot_name" value="$(arg veh)"/>
