@@ -11,7 +11,7 @@ dt-launchfile-init
 # This launcher passes veh:=${VEHICLE_NAME} into roslaunch; set VEHICLE_NAME manually
 # before `dts devel run` only if your container does not define it and defaults are wrong.
 
-VEH="${VEHICLE_NAME:-autobot01}"
+VEH="${VEHICLE_NAME:-bear}"
 dt-exec roslaunch assignment3 assignment3.launch veh:="${VEH}"
 
 # ----------------------------------------------------------------------------
