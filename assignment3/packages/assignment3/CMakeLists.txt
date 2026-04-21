@@ -12,6 +12,7 @@ catkin_package()
 
 catkin_install_python(PROGRAMS
   src/navigator_node.py
+  src/aruco_viewer.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

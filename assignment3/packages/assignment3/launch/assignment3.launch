@@ -7,39 +7,64 @@
     <param name="robot_name"             value="bear"/>
     <param name="cmd_topic"              value="/bear/car_cmd_switch_node/cmd"/>
 
-    <!-- Hareket hızları -->
+    <!-- Forward speeds -->
     <param name="linear_speed"           value="0.18"/>
-    <param name="align_linear_speed"     value="0.10"/>
-    <param name="handoff_linear_speed"   value="0.06"/>
-    <param name="handoff_duration_sec"   value="1.2"/>   <!-- 1.0→1.2: node geçişinde daha yumuşak -->
+    <param name="align_linear_speed"     value="0.0"/>   <!-- pure rotation during ALIGN -->
 
-    <!-- Açısal kontrol -->
-    <param name="angular_gain"           value="0.7"/>
-    <param name="max_angular_speed"      value="0.60"/>
-    <param name="yaw_bias"               value="0.05"/>  <!-- kod default'u; kameraya göre ayarla -->
+    <!-- Angular control -->
+    <param name="angular_gain"           value="0.9"/>
+    <param name="max_angular_speed"      value="1.6"/>
+    <param name="yaw_bias"               value="0.0"/>
+
+    <!--
+      Right-turn compensation.
+
+      Many Duckiebots cannot turn right reliably because the right-side motor
+      is weaker / calibration is off. These parameters amplify the magnitude
+      of negative omega (CW / right turn) so that the commanded value actually
+      leaves the motor deadband.
+
+        - right_turn_omega_scale : multiplier applied to omega<0 during
+          ALIGN/APPROACH (proportional control). 1.0 = no change.
+        - search_right_scale     : same, but while the robot is spinning in
+          SEARCH (pure rotation).
+        - min_turn_omega         : minimum |omega| whenever the robot is
+          rotating in place. Raise this if right turns stall.
+
+      If right turns still stall, raise the scales to 1.8 or 2.0, or raise
+      min_turn_omega to 0.9. If the robot now over-rotates right, lower them.
+    -->
+    <param name="right_turn_omega_scale" value="1.6"/>
+    <param name="search_right_scale"     value="1.6"/>
+    <param name="min_turn_omega"         value="0.75"/>
 
     <!--
       align_angle_max:
-        Eski launch'ta 0.35 rad vardı — bu çok geniş, robot neredeyse hiç
-        hizalanmadan düz gidiyordu.  Kod default'u 0.20 rad (~11°) olarak
-        güncellendi; daha sıkı hizalama sağlar.
+        Bearing (rad) below which the robot is considered "aligned" and may
+        drive forward at full linear_speed. ~0.20 rad = ~11°.
     -->
     <param name="align_angle_max"        value="0.20"/>
 
-    <!-- Hedef tag arama (tag kaybolunca) -->
-    <param name="search_angular_speed"   value="0.3"/>  <!-- N2->N6 gibi sola aramalarda daha güçlü dönüş -->
-    <param name="search_linear_speed"    value="0.02"/>
+    <!--
+      SEARCH behavior (target tag not visible).
+      The sign of the rotation is decided automatically from the A* path
+      (left/right turn expected at the current node); this value is just the
+      magnitude. A higher value spins the robot faster while searching.
+    -->
+    <param name="search_angular_speed"   value="0.9"/>
+    <param name="search_linear_speed"    value="0.0"/>   <!-- pure in-place rotation -->
 
     <!--
       proximity_threshold:
-        Eski launch'ta 0.18 m vardı — bu çok küçük, robot tag'a çarpacak
-        kadar yaklaşmadan "reached" basmıyordu.
-        Kod default'u 0.45 m; fiziksel lab ortamında 0.30 m iyi bir başlangıç.
+        Distance (m) to the target tag below which the node is considered
+        "reached", provided it stays there for REACH_CONFIRM_FRAMES frames.
+        0.30 m works well in the lab; tune if physical setup differs.
     -->
     <param name="proximity_threshold"    value="0.30"/>
 
-    <!-- Tag algılama -->
-    <param name="detection_stale_sec"    value="1.2"/>
+    <!-- Tag detection -->
+    <param name="detection_stale_sec"    value="1.0"/>
+    <param name="lost_coast_sec"         value="0.35"/>
     <param name="aruco_dictionary"       value="DICT_5X5_50"/>
 
   </node>

@@ -1,0 +1,19 @@
+<launch>
+  <arg name="veh"           default="$(optenv VEHICLE_NAME bear)"/>
+  <arg name="debug_image"   default="false"/>
+  <arg name="aruco_dict"    default="DICT_5X5_50"/>
+  <arg name="tag_size"      default="0.065"/>
+
+  <node pkg="assignment3"
+        type="aruco_viewer.py"
+        name="aruco_viewer"
+        output="screen"
+        required="true">
+
+    <param name="robot_name"              value="$(arg veh)"/>
+    <param name="aruco_dictionary"        value="$(arg aruco_dict)"/>
+    <param name="aruco_tag_size_meters"   value="$(arg tag_size)"/>
+    <param name="use_debug_image"         value="$(arg debug_image)"/>
+
+  </node>
+</launch>
