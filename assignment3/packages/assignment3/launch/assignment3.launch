@@ -1,11 +1,13 @@
 <launch>
+  <arg name="veh" default="$(optenv VEHICLE_NAME bear)"/>
+
   <node pkg="assignment3"
         type="navigator_node.py"
         name="assignment3_navigator"
         output="screen">
 
-    <param name="robot_name"             value="bear"/>
-    <param name="cmd_topic"              value="/bear/car_cmd_switch_node/cmd"/>
+    <param name="robot_name"             value="$(arg veh)"/>
+    <param name="cmd_topic"              value="/$(arg veh)/car_cmd_switch_node/cmd"/>
 
     <!-- Forward speeds -->
     <param name="linear_speed"           value="0.18"/>

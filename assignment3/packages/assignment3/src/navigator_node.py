@@ -5,8 +5,9 @@ with debug image publishing.
 
 Control logic is a small state machine per A* leg:
 
-    SEARCH       - target tag not visible: rotate in place in the direction
-                   predicted from the A* grid geometry (left/right turn).
+    SEARCH       - target tag not visible: continuously rotate in place in
+                   the direction predicted from the A* grid geometry
+                   (left/right turn).
     ALIGN        - target tag visible but yaw error is large: turn in place
                    (with a small forward creep) until bearing is good.
     APPROACH     - target tag visible and bearing small: drive forward with
@@ -48,10 +49,6 @@ LOST_COAST_SEC_DEFAULT = 0.35       # keep last command briefly on momentary los
 PASS_THROUGH_TIME_DEFAULT = 1.5     # seconds to drive through node after reaching it
 PASS_THROUGH_SPEED_DEFAULT = 0.18   # forward speed during pass-through
 PASS_THROUGH_ALIGN_THRESHOLD_DEFAULT = 0.10  # max yaw error (rad) to enter PASS_THROUGH
-
-# Incremental search parameters
-SEARCH_STEP_TIME_DEFAULT = 0.8      # seconds to rotate during each search step
-SEARCH_PAUSE_TIME_DEFAULT = 0.5     # seconds to pause and look after each rotation step
 
 # Minimum angular velocity magnitude when ALIGN/SEARCH is rotating in place.
 # Below this the Duckiebot motors often stall (PWM below deadband), which
@@ -196,12 +193,6 @@ class Assignment3Navigator:
         self.pass_through_align_threshold = float(
             rospy.get_param("~pass_through_align_threshold", PASS_THROUGH_ALIGN_THRESHOLD_DEFAULT)
         )
-        self.search_step_time = float(
-            rospy.get_param("~search_step_time", SEARCH_STEP_TIME_DEFAULT)
-        )
-        self.search_pause_time = float(
-            rospy.get_param("~search_pause_time", SEARCH_PAUSE_TIME_DEFAULT)
-        )
         self.aruco_tag_size = float(
             rospy.get_param("~aruco_tag_size_meters", ARUCO_TAG_SIZE_METERS_DEFAULT)
         )
@@ -273,10 +264,6 @@ class Assignment3Navigator:
         # Pass-through state
         self._pass_through_start_time: Optional[rospy.Time] = None
         
-        # Incremental search state
-        self._search_phase = "rotate"  # "rotate" or "pause"
-        self._search_phase_start_time: Optional[rospy.Time] = None
-
         image_topic = rospy.get_param(
             "~camera_image_topic",
             "/%s/camera_node/image/compressed" % self.robot_name,
@@ -655,10 +642,6 @@ class Assignment3Navigator:
             info = self._get_fresh_target_info(target_node, now)
 
             if info is not None:
-                # Target detected: reset search phase for next time we need to search
-                self._search_phase = "rotate"
-                self._search_phase_start_time = None
-                
                 dist, yaw_err = info
                 self._last_yaw_err = yaw_err
                 self._last_info_time = now
@@ -699,45 +682,17 @@ class Assignment3Navigator:
                     omega = self._compensate_right_turn(omega)
                     self._publish_cmd(self.linear_speed, omega)
             else:
-                # No fresh info for the target: enter incremental SEARCH
+                # No fresh info for the target: rotate continuously in SEARCH
                 self._state = self.STATE_SEARCH
-                self._incremental_search(now)
+                self._continuous_search()
                 self._log_wait_reason(target_node)
 
             self._rate.sleep()
 
-    def _incremental_search(self, now: rospy.Time) -> None:
-        """Perform incremental search: rotate for a bit, then pause to look.
-        
-        This gives the camera time to detect markers during the pause phases
-        instead of continuously rotating which makes detection harder.
-        """
-        if self._search_phase_start_time is None:
-            self._search_phase_start_time = now
-            self._search_phase = "rotate"
-        
-        elapsed = (now - self._search_phase_start_time).to_sec()
-        
-        if self._search_phase == "rotate":
-            if elapsed >= self.search_step_time:
-                # Switch to pause phase
-                self._search_phase = "pause"
-                self._search_phase_start_time = now
-                self._publish_cmd(0.0, 0.0)  # Stop and look
-            else:
-                # Continue rotating
-                omega = self._search_omega_now()
-                self._publish_cmd(self.search_linear_speed, omega)
-        else:  # pause phase
-            if elapsed >= self.search_pause_time:
-                # Switch back to rotate phase
-                self._search_phase = "rotate"
-                self._search_phase_start_time = now
-                omega = self._search_omega_now()
-                self._publish_cmd(self.search_linear_speed, omega)
-            else:
-                # Stay paused
-                self._publish_cmd(0.0, 0.0)
+    def _continuous_search(self) -> None:
+        """Rotate continuously in place while searching for the target tag."""
+        omega = self._search_omega_now()
+        self._publish_cmd(self.search_linear_speed, omega)
 
     def _search_omega_now(self) -> float:
         """Pick angular velocity for SEARCH.
@@ -771,8 +726,6 @@ class Assignment3Navigator:
         self._last_yaw_err = None
         self._last_info_time = None
         self._pass_through_start_time = None
-        self._search_phase = "rotate"
-        self._search_phase_start_time = None
         self._leg += 1
         self._state = self.STATE_SEARCH
         if self._leg < len(self.path):
