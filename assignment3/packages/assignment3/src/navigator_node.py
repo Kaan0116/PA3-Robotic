@@ -5,14 +5,14 @@ with debug image publishing.
 
 Control logic is a small state machine per A* leg:
 
-    SEARCH   - target tag not visible: rotate in place in the direction
-               predicted from the A* grid geometry (left/right turn).
-    ALIGN    - target tag visible but yaw error is large: turn in place
-               (with a small forward creep) until bearing is good.
-    APPROACH - target tag visible and bearing small: drive forward with
-               proportional yaw correction.
-    REACHED  - target distance below threshold for REACH_CONFIRM_FRAMES
-               consecutive frames: advance to the next leg.
+    SEARCH       - target tag not visible: rotate in place in the direction
+                   predicted from the A* grid geometry (left/right turn).
+    ALIGN        - target tag visible but yaw error is large: turn in place
+                   (with a small forward creep) until bearing is good.
+    APPROACH     - target tag visible and bearing small: drive forward with
+                   proportional yaw correction.
+    PASS_THROUGH - target reached: drive straight forward through the node
+                   for a fixed duration before advancing to next leg.
 """
 from __future__ import annotations
 
@@ -45,6 +45,13 @@ WAIT_LOG_PERIOD_SEC_DEFAULT = 2.0
 YAW_BIAS_DEFAULT = 0.0              # calibrated from the robot's camera
 CMD_LOG_PERIOD_SEC_DEFAULT = 1.0
 LOST_COAST_SEC_DEFAULT = 0.35       # keep last command briefly on momentary loss
+PASS_THROUGH_TIME_DEFAULT = 1.5     # seconds to drive through node after reaching it
+PASS_THROUGH_SPEED_DEFAULT = 0.18   # forward speed during pass-through
+PASS_THROUGH_ALIGN_THRESHOLD_DEFAULT = 0.10  # max yaw error (rad) to enter PASS_THROUGH
+
+# Incremental search parameters
+SEARCH_STEP_TIME_DEFAULT = 0.8      # seconds to rotate during each search step
+SEARCH_PAUSE_TIME_DEFAULT = 0.5     # seconds to pause and look after each rotation step
 
 # Minimum angular velocity magnitude when ALIGN/SEARCH is rotating in place.
 # Below this the Duckiebot motors often stall (PWM below deadband), which
@@ -134,6 +141,7 @@ class Assignment3Navigator:
     STATE_SEARCH = "SEARCH"
     STATE_ALIGN = "ALIGN"
     STATE_APPROACH = "APPROACH"
+    STATE_PASS_THROUGH = "PASS_THROUGH"
 
     def __init__(self) -> None:
         self.robot_name = rospy.get_param("~robot_name", ROBOT_NAME_DEFAULT)
@@ -179,6 +187,21 @@ class Assignment3Navigator:
             rospy.get_param("~search_right_scale", SEARCH_RIGHT_SCALE_DEFAULT)
         )
         self.yaw_bias = float(rospy.get_param("~yaw_bias", YAW_BIAS_DEFAULT))
+        self.pass_through_time = float(
+            rospy.get_param("~pass_through_time", PASS_THROUGH_TIME_DEFAULT)
+        )
+        self.pass_through_speed = float(
+            rospy.get_param("~pass_through_speed", PASS_THROUGH_SPEED_DEFAULT)
+        )
+        self.pass_through_align_threshold = float(
+            rospy.get_param("~pass_through_align_threshold", PASS_THROUGH_ALIGN_THRESHOLD_DEFAULT)
+        )
+        self.search_step_time = float(
+            rospy.get_param("~search_step_time", SEARCH_STEP_TIME_DEFAULT)
+        )
+        self.search_pause_time = float(
+            rospy.get_param("~search_pause_time", SEARCH_PAUSE_TIME_DEFAULT)
+        )
         self.aruco_tag_size = float(
             rospy.get_param("~aruco_tag_size_meters", ARUCO_TAG_SIZE_METERS_DEFAULT)
         )
@@ -246,6 +269,13 @@ class Assignment3Navigator:
         self._search_sign = self._compute_search_sign(self._leg)
         self._last_yaw_err: Optional[float] = None
         self._last_info_time: Optional[rospy.Time] = None
+        
+        # Pass-through state
+        self._pass_through_start_time: Optional[rospy.Time] = None
+        
+        # Incremental search state
+        self._search_phase = "rotate"  # "rotate" or "pause"
+        self._search_phase_start_time: Optional[rospy.Time] = None
 
         image_topic = rospy.get_param(
             "~camera_image_topic",
@@ -605,6 +635,23 @@ class Assignment3Navigator:
 
             target_node = self.path[self._leg]
             now = rospy.Time.now()
+            
+            # Handle PASS_THROUGH state: drive straight through the node
+            if self._state == self.STATE_PASS_THROUGH:
+                if self._pass_through_start_time is None:
+                    self._pass_through_start_time = now
+                
+                elapsed = (now - self._pass_through_start_time).to_sec()
+                if elapsed >= self.pass_through_time:
+                    # Finished passing through, advance to next leg
+                    self._advance_leg_after_pass_through(target_node)
+                    continue
+                else:
+                    # Keep driving straight through
+                    self._publish_cmd(self.pass_through_speed, 0.0)
+                    self._rate.sleep()
+                    continue
+            
             info = self._get_fresh_target_info(target_node, now)
 
             if info is not None:
@@ -615,7 +662,15 @@ class Assignment3Navigator:
 
                 reach_count = self._reach_buffer.get(target_node, 0)
                 if dist < self.proximity_threshold and reach_count >= REACH_CONFIRM_FRAMES:
-                    self._advance_leg(target_node, dist)
+                    # Node reached: enter PASS_THROUGH state instead of advancing immediately
+                    rospy.loginfo(
+                        "Node N%d reached (dist %.3f m). Entering PASS_THROUGH state for %.1f seconds.",
+                        target_node,
+                        dist,
+                        self.pass_through_time,
+                    )
+                    self._state = self.STATE_PASS_THROUGH
+                    self._pass_through_start_time = None  # Will be set on next iteration
                     continue
 
                 if abs(yaw_cmd) > self.align_angle_max:
@@ -663,6 +718,35 @@ class Assignment3Navigator:
         else:
             omega = magnitude  # small default (CCW / left)
         return self._compensate_right_turn(omega, search=True)
+
+    def _advance_leg_after_pass_through(self, reached_node: int) -> None:
+        """Advance to the next leg after passing through a node."""
+        rospy.loginfo(
+            "Passed through node N%d. Advancing leg %d -> %d.",
+            reached_node,
+            self._leg,
+            self._leg + 1,
+        )
+        # Discard the tag we just reached so the next iteration can't use it
+        self._tag_metrics.pop(reached_node, None)
+        self._detection_buffer = {}
+        self._reach_buffer = {}
+        self._last_yaw_err = None
+        self._last_info_time = None
+        self._pass_through_start_time = None
+        self._leg += 1
+        self._state = self.STATE_SEARCH
+        if self._leg < len(self.path):
+            self._search_sign = self._compute_search_sign(self._leg)
+            rospy.loginfo(
+                "Next target: N%d  (search_sign=%+.1f)",
+                self.path[self._leg],
+                self._search_sign,
+            )
+        # Stop briefly so the next state starts cleanly
+        self._hard_stop()
+        if self._leg >= len(self.path):
+            self._finish_goal()
 
     def _advance_leg(self, reached_node: int, dist: float) -> None:
         rospy.loginfo(

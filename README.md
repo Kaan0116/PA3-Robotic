@@ -19,6 +19,7 @@ Navigator düğümü, yolu önce hesaplar ve ardından gerçek zamanlı AprilTag
 ```text
 PA3_ROBOTIC/
 ├── README.md
+├── view_aruco.sh
 └── assignment3/
     ├── Dockerfile
     ├── dt-project.yaml
@@ -33,9 +34,11 @@ PA3_ROBOTIC/
             ├── CMakeLists.txt
             ├── package.xml
             ├── launch/
-            │   └── assignment3.launch
+            │   ├── assignment3.launch
+            │   └── aruco_viewer.launch
             └── src/
                 ├── astar.py
+                ├── aruco_viewer.py
                 └── navigator_node.py
 ```
 
@@ -48,9 +51,20 @@ PA3_ROBOTIC/
 
 * **navigator_node.py**
   Ana ROS düğümüdür. Yolu yükler, AprilTag verilerini dinler ve hareket komutlarını yayınlar.
+  Davranış `SEARCH → ALIGN → APPROACH → REACHED` state machine'i ile yürütülür.
+
+* **aruco_viewer.py**
+  Bilgisayarınızda açılan, robotun kamera yayınını canlı olarak gösteren ve ArUco
+  etiketlerini kutu/ID/uzaklık/yön olarak üstüne çizen viewer uygulamasıdır.
 
 * **assignment3.launch**
   Navigator düğümünü başlatır.
+
+* **aruco_viewer.launch**
+  Viewer'ı `rosrun` / `roslaunch` ile başlatmak için launch dosyası.
+
+* **view_aruco.sh** (repo kökü)
+  Viewer'ı doğrudan bilgisayarınızdan başlatmak için kabuk betiği.
 
 * **default.sh**
   Duckietown çalıştırma scriptidir (`dts devel run` ile kullanılır).
@@ -95,6 +109,37 @@ dts devel build -f --arch arm32v7 -H ROBOTNAME.local
 
 ```bash
 dts devel run -H ROBOTNAME.local
+```
+
+---
+
+## ArUco Viewer (bilgisayarınızda canlı izleme)
+
+ArUco algılamalarını kendi bilgisayarınızda canlı olarak görmek için:
+
+```bash
+# ROS master'a erişim (gerekirse)
+export ROS_MASTER_URI=http://bear.local:11311
+export ROS_HOSTNAME=$(hostname).local
+
+./view_aruco.sh            # varsayılan robot "bear"
+./view_aruco.sh autobot01  # farklı robot adı
+DEBUG=1 ./view_aruco.sh    # navigator'ın debug_image topic'ini izle
+```
+
+Viewer, robotun kamera yayınını bir OpenCV penceresinde gösterir; görülen
+her ArUco için kare çerçeve, ID, tahmini mesafe ve bearing (derece) çizer.
+Pencereyi kapatmak için `q` veya `ESC`.
+
+Gereksinimler (bilgisayarınızda):
+* ROS (noetic / melodic) sourced
+* Python 3 + `opencv-contrib-python`, `numpy`
+* `duckietown_msgs` / `sensor_msgs`
+
+`roslaunch` ile de başlatılabilir:
+
+```bash
+roslaunch assignment3 aruco_viewer.launch veh:=bear
 ```
 
 ---
