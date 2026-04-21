@@ -37,10 +37,10 @@ LINEAR_SPEED_DEFAULT = 0.18
 ANGULAR_GAIN_DEFAULT = 0.9          # Hizalanma hassasiyeti
 PROXIMITY_THRESHOLD_DEFAULT = 0.45
 ALIGN_ANGLE_MAX_DEFAULT = 0.20      # rad (~11°) - Bu açıdan büyük sapmalarda robot dönmeye başlar
-SEARCH_ANGULAR_SPEED_DEFAULT = 0.9  # Arama sırasındaki dönüş hızı
+SEARCH_ANGULAR_SPEED_DEFAULT = 1.3 # Arama sırasındaki dönüş hızı
 SEARCH_LINEAR_SPEED_DEFAULT = 0.0   # Arama yaparken ileri gitme (0.0 = olduğu yerde döner)
 ALIGN_LINEAR_SPEED_DEFAULT = 0.0    # Hizalanırken ileri gitme
-MAX_ANGULAR_SPEED_DEFAULT = 1.6
+MAX_ANGULAR_SPEED_DEFAULT = 3.0
 DETECTION_STALE_SEC_DEFAULT = 1.0
 WAIT_LOG_PERIOD_SEC_DEFAULT = 2.0
 YAW_BIAS_DEFAULT = 0.0              
@@ -55,7 +55,7 @@ MIN_TURN_OMEGA_DEFAULT = 0.75
 
 # Sağ motor zayıfsa sağa dönüşleri (negatif omega) kuvvetlendirme katsayısı
 RIGHT_TURN_OMEGA_SCALE_DEFAULT = 1.6
-SEARCH_RIGHT_SCALE_DEFAULT = 1.6
+SEARCH_RIGHT_SCALE_DEFAULT = 2.2
 
 ARUCO_TAG_SIZE_METERS_DEFAULT = 0.065
 ARUCO_DICTIONARY_DEFAULT = "DICT_5X5_50"
