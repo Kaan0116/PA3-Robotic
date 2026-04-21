@@ -655,18 +655,26 @@ class Assignment3Navigator:
             info = self._get_fresh_target_info(target_node, now)
 
             if info is not None:
+                # Target detected: reset search phase for next time we need to search
+                self._search_phase = "rotate"
+                self._search_phase_start_time = None
+                
                 dist, yaw_err = info
                 self._last_yaw_err = yaw_err
                 self._last_info_time = now
                 yaw_cmd = yaw_err + self.yaw_bias
 
                 reach_count = self._reach_buffer.get(target_node, 0)
-                if dist < self.proximity_threshold and reach_count >= REACH_CONFIRM_FRAMES:
-                    # Node reached: enter PASS_THROUGH state instead of advancing immediately
+                # Check if node is reached AND robot is well-aligned before passing through
+                if (dist < self.proximity_threshold and 
+                    reach_count >= REACH_CONFIRM_FRAMES and
+                    abs(yaw_cmd) < self.pass_through_align_threshold):
+                    # Node reached and aligned: enter PASS_THROUGH state
                     rospy.loginfo(
-                        "Node N%d reached (dist %.3f m). Entering PASS_THROUGH state for %.1f seconds.",
+                        "Node N%d reached (dist %.3f m, yaw %.3f rad) and aligned. Entering PASS_THROUGH state for %.1f seconds.",
                         target_node,
                         dist,
+                        yaw_cmd,
                         self.pass_through_time,
                     )
                     self._state = self.STATE_PASS_THROUGH
@@ -691,16 +699,45 @@ class Assignment3Navigator:
                     omega = self._compensate_right_turn(omega)
                     self._publish_cmd(self.linear_speed, omega)
             else:
-                # No fresh info for the target: decide between coasting briefly
-                # (momentary loss) or entering SEARCH (rotate in predicted dir).
+                # No fresh info for the target: enter incremental SEARCH
                 self._state = self.STATE_SEARCH
-                self._publish_cmd(
-                    self.search_linear_speed,
-                    self._search_omega_now(),
-                )
+                self._incremental_search(now)
                 self._log_wait_reason(target_node)
 
             self._rate.sleep()
+
+    def _incremental_search(self, now: rospy.Time) -> None:
+        """Perform incremental search: rotate for a bit, then pause to look.
+        
+        This gives the camera time to detect markers during the pause phases
+        instead of continuously rotating which makes detection harder.
+        """
+        if self._search_phase_start_time is None:
+            self._search_phase_start_time = now
+            self._search_phase = "rotate"
+        
+        elapsed = (now - self._search_phase_start_time).to_sec()
+        
+        if self._search_phase == "rotate":
+            if elapsed >= self.search_step_time:
+                # Switch to pause phase
+                self._search_phase = "pause"
+                self._search_phase_start_time = now
+                self._publish_cmd(0.0, 0.0)  # Stop and look
+            else:
+                # Continue rotating
+                omega = self._search_omega_now()
+                self._publish_cmd(self.search_linear_speed, omega)
+        else:  # pause phase
+            if elapsed >= self.search_pause_time:
+                # Switch back to rotate phase
+                self._search_phase = "rotate"
+                self._search_phase_start_time = now
+                omega = self._search_omega_now()
+                self._publish_cmd(self.search_linear_speed, omega)
+            else:
+                # Stay paused
+                self._publish_cmd(0.0, 0.0)
 
     def _search_omega_now(self) -> float:
         """Pick angular velocity for SEARCH.
@@ -734,6 +771,8 @@ class Assignment3Navigator:
         self._last_yaw_err = None
         self._last_info_time = None
         self._pass_through_start_time = None
+        self._search_phase = "rotate"
+        self._search_phase_start_time = None
         self._leg += 1
         self._state = self.STATE_SEARCH
         if self._leg < len(self.path):
