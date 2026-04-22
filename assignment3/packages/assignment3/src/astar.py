@@ -49,7 +49,7 @@ GRAPH: Dict[int, List[Tuple[int, float]]] = {
 
 
 def euclidean_heuristic(node: int, goal: int) -> float:
-    # Straight-line distance in the (x,y) chart; this is our h(n) for A* (common pick for these classroom grids).
+    # Straight-line distance in the (x,y) chart; used as h(n) for A* on this map.
     x1, y1 = COORDINATES[node]
     x2, y2 = COORDINATES[goal]
     return math.hypot(x2 - x1, y2 - y1)

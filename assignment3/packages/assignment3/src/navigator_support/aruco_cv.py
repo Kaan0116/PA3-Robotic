@@ -12,7 +12,7 @@ def build_aruco_dictionary(name: str):
 
 
 def build_detector_parameters():
-    # OpenCV 4.x has DetectorParameters(); older tutorials use DetectorParameters_create().
+    # OpenCV 4.x uses DetectorParameters(); older API used DetectorParameters_create().
     if hasattr(cv2.aruco, "DetectorParameters"):
         return cv2.aruco.DetectorParameters()
     return cv2.aruco.DetectorParameters_create()

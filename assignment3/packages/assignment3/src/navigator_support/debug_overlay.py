@@ -5,7 +5,7 @@ import numpy as np
 
 
 def draw_debug_overlay(frame: np.ndarray, target_node: int, state: str) -> np.ndarray:
-    # Helper to draw text on a camera frame (e.g. for a debug video). Not wired into the main publisher by default.
+    # Draw target node + state on a copy of the frame (use if you publish a separate debug stream).
     debug = frame.copy()
     cv2.putText(
         debug,

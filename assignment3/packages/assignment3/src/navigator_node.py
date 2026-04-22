@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# Navigator node for PA3: follow an A* path on the grid using ArUco tags only.
 # The robot never gets global pose; it only sees tags in the camera and drives toward the next node ID on the path.
 #
 # States (one "leg" = go from previous node to current target node on the path):
@@ -124,7 +123,7 @@ class Assignment3Navigator:
         self.aruco_dictionary = build_aruco_dictionary(self.aruco_dictionary_name)
         self.aruco_parameters = build_detector_parameters()
 
-        # Fixed assignment task: plan once from N0 to N15 on the given graph.
+        # plan once from N0 to N15 on the given graph.
         path, cost = astar.astar_search(0, 15, verbose=True)
         if path is None:
             rospy.logfatal("A* found no path from N0 to N15.")
@@ -238,7 +237,7 @@ class Assignment3Navigator:
             self._state = self.STATE_SEARCH
             magnitude = max(abs(self.search_omega), self.min_turn_omega)
             # If we had a yaw error before losing the tag, keep spinning that way; else use the grid-based guess.
-            # Note: yaw_err == 0.0 is treated as "no memory" on purpose (matches our original behavior).
+            # yaw_err == 0.0 counts as "no remembered direction" so we fall back to the grid hint.
             if self._last_yaw_err:
                 omega = math.copysign(magnitude, self._last_yaw_err)
             else:
@@ -258,7 +257,7 @@ class Assignment3Navigator:
         ):
             self._state = self.STATE_PASS_THROUGH
             self._pass_through_start_time = None
-            # Skip the main loop sleep once here so PASS_THROUGH starts immediately (same timing as before refactor).
+            # Skip one Rate.sleep() here so we enter PASS_THROUGH right away instead of waiting a whole cycle.
             return True
 
         if abs(yaw_cmd) > self.align_angle_max:
