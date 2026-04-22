@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""
-A* path planning from scratch (no path-planning libraries).
-Grid graph N0..N15 with coordinates and edge costs as specified for PA3.
-"""
+# A* from scratch for the PA3 grid (no planning libraries).
+# Nodes N0..N15 have (x,y) positions; edges have nonnegative costs from the assignment PDF.
 from __future__ import annotations
 
 import heapq
 import math
 from typing import Dict, List, Optional, Set, Tuple
 
-# Node coordinates (x, y) — indices match node id
+# Same index as the node id: used by the heuristic and by navigator path_geometry.
 COORDINATES: Dict[int, Tuple[float, float]] = {
     0:  (0.0, 0.0),
     1:  (1.0, 0.0),
@@ -29,7 +27,7 @@ COORDINATES: Dict[int, Tuple[float, float]] = {
     15: (3.0, 3.0),
 }
 
-# Undirected graph: neighbor -> edge cost (exactly as in assignment)
+# Undirected graph stored as adjacency list: (neighbor, edge_cost).
 GRAPH: Dict[int, List[Tuple[int, float]]] = {
     0:  [(1, 1.5), (4, 2.0)],
     1:  [(0, 1.5), (2, 1.0), (5, 2.0)],
@@ -51,7 +49,7 @@ GRAPH: Dict[int, List[Tuple[int, float]]] = {
 
 
 def euclidean_heuristic(node: int, goal: int) -> float:
-    """h(n): Euclidean distance from node to goal using grid coordinates."""
+    # Straight-line distance in the (x,y) chart; used as h(n) for A* on this map.
     x1, y1 = COORDINATES[node]
     x2, y2 = COORDINATES[goal]
     return math.hypot(x2 - x1, y2 - y1)
@@ -60,26 +58,20 @@ def euclidean_heuristic(node: int, goal: int) -> float:
 def astar_search(
     start: int, goal: int, verbose: bool = False
 ) -> Tuple[Optional[List[int]], float]:
-    """
-    A* search with:
-      - OPEN  : min-heap ordered by (f, h) — equal f → lower h first
-      - CLOSED: set of expanded nodes
-      - Tracks g(n), h(n), f(n) and parent for path reconstruction
-    """
     if start not in COORDINATES or goal not in COORDINATES:
         return None, float("nan")
 
     def h(n: int) -> float:
         return euclidean_heuristic(n, goal)
 
-    # OPEN: (f, h, g, node)
+    # Heap entries are (f, h, g, node). Python compares tuples left-to-right, so equal f breaks ties by lower h.
     OPEN: List[Tuple[float, float, float, int]] = []
     CLOSED: Set[int] = set()
     g_score: Dict[int, float] = {start: 0.0}
     parent: Dict[int, Optional[int]] = {start: None}
 
     h0 = h(start)
-    f0 = h0  # g=0 at start
+    f0 = h0
     heapq.heappush(OPEN, (f0, h0, 0.0, start))
 
     if verbose:
@@ -107,7 +99,6 @@ def astar_search(
             print(f"{step:>4}  N{current:<5}  {g:>8.4f}  {hn:>8.4f}  {fn:>8.4f}")
 
         if current == goal:
-            # Reconstruct path via parent tracking
             path: List[int] = []
             cur: Optional[int] = goal
             while cur is not None:
