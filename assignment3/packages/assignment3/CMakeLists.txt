@@ -21,6 +21,10 @@ install(FILES src/astar.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
+install(DIRECTORY src/navigator_support/
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}/navigator_support
+)
+
 install(DIRECTORY launch/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
 )

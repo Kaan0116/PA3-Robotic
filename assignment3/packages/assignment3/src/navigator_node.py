@@ -1,20 +1,12 @@
 #!/usr/bin/env python3
-"""
-ROS navigator: ArUco-only localization, A* path following, car_cmd_switch control
-with debug image publishing.
-
-Control logic is a small state machine per A* leg:
-
-    SEARCH       - target tag not visible: continuously rotate in place in
-                   the direction predicted from the A* grid geometry
-                   (left/right turn).
-    ALIGN        - target tag visible but yaw error is large: turn in place
-                   (with a small forward creep) until bearing is good.
-    APPROACH     - target tag visible and bearing small: drive forward with
-                   proportional yaw correction.
-    PASS_THROUGH - target reached: drive straight forward through the node
-                   for a fixed duration before advancing to next leg.
-"""
+# Navigator node for PA3: follow an A* path on the grid using ArUco tags only.
+# The robot never gets global pose; it only sees tags in the camera and drives toward the next node ID on the path.
+#
+# States (one "leg" = go from previous node to current target node on the path):
+#   SEARCH       - can't trust the target tag yet -> spin to find it (direction guessed from the grid polyline).
+#   ALIGN        - tag visible but we're pointed wrong -> turn in place (P control on yaw error).
+#   APPROACH     - tag visible and roughly aligned -> drive forward while correcting omega.
+#   PASS_THROUGH - we're close enough and lined up -> drive straight a bit so we physically cross the node, then next leg.
 from __future__ import annotations
 
 import math
@@ -28,82 +20,52 @@ import rospy
 from duckietown_msgs.msg import Twist2DStamped
 from sensor_msgs.msg import CompressedImage
 
-# -----------------------------------------------------------------------------
-# Defaults (Buradaki değerleri robotun dönme performansına göre güncelleyebilirsin)
-# -----------------------------------------------------------------------------
-ROBOT_NAME_DEFAULT = "bear"
-
-LINEAR_SPEED_DEFAULT = 0.18
-ANGULAR_GAIN_DEFAULT = 0.9          # Hizalanma hassasiyeti
-PROXIMITY_THRESHOLD_DEFAULT = 0.45
-ALIGN_ANGLE_MAX_DEFAULT = 0.20      # rad (~11°) - Bu açıdan büyük sapmalarda robot dönmeye başlar
-SEARCH_ANGULAR_SPEED_DEFAULT = 1.3 # Arama sırasındaki dönüş hızı
-SEARCH_LINEAR_SPEED_DEFAULT = 0.0   # Arama yaparken ileri gitme (0.0 = olduğu yerde döner)
-ALIGN_LINEAR_SPEED_DEFAULT = 0.0    # Hizalanırken ileri gitme
-MAX_ANGULAR_SPEED_DEFAULT = 3.0
-DETECTION_STALE_SEC_DEFAULT = 1.0
-WAIT_LOG_PERIOD_SEC_DEFAULT = 2.0
-YAW_BIAS_DEFAULT = 0.0              
-CMD_LOG_PERIOD_SEC_DEFAULT = 1.0
-LOST_COAST_SEC_DEFAULT = 0.35       
-PASS_THROUGH_TIME_DEFAULT = 1.5     # Düğümü geçtikten sonra ne kadar süre düz gideceği
-PASS_THROUGH_SPEED_DEFAULT = 0.18   
-PASS_THROUGH_ALIGN_THRESHOLD_DEFAULT = 0.10  
-
-# Motorun ölü bölgesini (stall) aşmak için gereken minimum dönüş hızı
-MIN_TURN_OMEGA_DEFAULT = 0.75
-
-# Sağ motor zayıfsa sağa dönüşleri (negatif omega) kuvvetlendirme katsayısı
-RIGHT_TURN_OMEGA_SCALE_DEFAULT = 1.6
-SEARCH_RIGHT_SCALE_DEFAULT = 2.2
-
-ARUCO_TAG_SIZE_METERS_DEFAULT = 0.065
-ARUCO_DICTIONARY_DEFAULT = "DICT_5X5_50"
-
-# Kamera Kalibrasyon Ayarları
-CAMERA_FX_DEFAULT = 270.4563591302591
-CAMERA_FY_DEFAULT = 269.2951665378049
-CAMERA_CX_DEFAULT = 314.1813567017415
-CAMERA_CY_DEFAULT = 218.88618596346137
-
-DIST_K1_DEFAULT = -0.19162991260105328
-DIST_K2_DEFAULT =  0.026384790215657535
-DIST_P1_DEFAULT =  0.005682129590129115
-DIST_P2_DEFAULT =  0.0006647376545041703
-DIST_K3_DEFAULT =  0.0
-
-CONFIRM_FRAMES = 2
-REACH_CONFIRM_FRAMES = 3
-
+# ROS installs scripts in a folder with astar.py and navigator_support/ next to this file; make imports work the same in devel and install.
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PKG_DIR not in sys.path:
     sys.path.insert(0, _PKG_DIR)
 
-import astar  # A* algoritmasını içeren dosya [cite: 44]
+import astar
 
-def _norm3(x: float, y: float, z: float) -> float:
-    return math.sqrt(x * x + y * y + z * z)
+from navigator_support.aruco_cv import build_aruco_dictionary, build_detector_parameters, detect_markers
+from navigator_support.defaults import (
+    ALIGN_ANGLE_MAX_DEFAULT,
+    ALIGN_LINEAR_SPEED_DEFAULT,
+    ANGULAR_GAIN_DEFAULT,
+    ARUCO_DICTIONARY_DEFAULT,
+    ARUCO_TAG_SIZE_METERS_DEFAULT,
+    CAMERA_CX_DEFAULT,
+    CAMERA_CY_DEFAULT,
+    CAMERA_FX_DEFAULT,
+    CAMERA_FY_DEFAULT,
+    CMD_LOG_PERIOD_SEC_DEFAULT,
+    CONFIRM_FRAMES,
+    DETECTION_STALE_SEC_DEFAULT,
+    DIST_K1_DEFAULT,
+    DIST_K2_DEFAULT,
+    DIST_K3_DEFAULT,
+    DIST_P1_DEFAULT,
+    DIST_P2_DEFAULT,
+    LINEAR_SPEED_DEFAULT,
+    LOST_COAST_SEC_DEFAULT,
+    MAX_ANGULAR_SPEED_DEFAULT,
+    MIN_TURN_OMEGA_DEFAULT,
+    PASS_THROUGH_ALIGN_THRESHOLD_DEFAULT,
+    PASS_THROUGH_SPEED_DEFAULT,
+    PASS_THROUGH_TIME_DEFAULT,
+    PROXIMITY_THRESHOLD_DEFAULT,
+    REACH_CONFIRM_FRAMES,
+    RIGHT_TURN_OMEGA_SCALE_DEFAULT,
+    ROBOT_NAME_DEFAULT,
+    SEARCH_ANGULAR_SPEED_DEFAULT,
+    SEARCH_LINEAR_SPEED_DEFAULT,
+    SEARCH_RIGHT_SCALE_DEFAULT,
+    WAIT_LOG_PERIOD_SEC_DEFAULT,
+    YAW_BIAS_DEFAULT,
+)
+from navigator_support.geometry import bearing_to_tag, norm3
+from navigator_support.path_geometry import compute_search_turn_sign
 
-def _bearing_to_tag(tx: float, ty: float, tz: float) -> float:
-    """Robotun etikete göre olan açısal hatasını (yaw error) hesaplar."""
-    return math.atan2(-tx, tz)
-
-def _build_aruco_dictionary(name: str):
-    attr = getattr(cv2.aruco, name, None)
-    if attr is None:
-        raise ValueError("Unsupported ArUco dictionary '%s'" % name)
-    return cv2.aruco.getPredefinedDictionary(attr)
-
-def _build_detector_parameters():
-    if hasattr(cv2.aruco, "DetectorParameters"):
-        return cv2.aruco.DetectorParameters()
-    return cv2.aruco.DetectorParameters_create()
-
-def _detect_markers(image, dictionary, parameters):
-    if hasattr(cv2.aruco, "ArucoDetector"):
-        detector = cv2.aruco.ArucoDetector(dictionary, parameters)
-        return detector.detectMarkers(image)
-    return cv2.aruco.detectMarkers(image, dictionary, parameters=parameters)
 
 class Assignment3Navigator:
     STATE_SEARCH = "SEARCH"
@@ -112,7 +74,7 @@ class Assignment3Navigator:
     STATE_PASS_THROUGH = "PASS_THROUGH"
 
     def __init__(self) -> None:
-        # ROS parametrelerini yükleme [cite: 44]
+        # All tunables come from the private namespace (~param) so launch files can override without editing code.
         self.robot_name = rospy.get_param("~robot_name", ROBOT_NAME_DEFAULT)
         self.linear_speed = float(rospy.get_param("~linear_speed", LINEAR_SPEED_DEFAULT))
         self.angular_gain = float(rospy.get_param("~angular_gain", ANGULAR_GAIN_DEFAULT))
@@ -132,26 +94,37 @@ class Assignment3Navigator:
         self.yaw_bias = float(rospy.get_param("~yaw_bias", YAW_BIAS_DEFAULT))
         self.pass_through_time = float(rospy.get_param("~pass_through_time", PASS_THROUGH_TIME_DEFAULT))
         self.pass_through_speed = float(rospy.get_param("~pass_through_speed", PASS_THROUGH_SPEED_DEFAULT))
-        self.pass_through_align_threshold = float(rospy.get_param("~pass_through_align_threshold", PASS_THROUGH_ALIGN_THRESHOLD_DEFAULT))
+        self.pass_through_align_threshold = float(
+            rospy.get_param("~pass_through_align_threshold", PASS_THROUGH_ALIGN_THRESHOLD_DEFAULT)
+        )
         self.aruco_tag_size = float(rospy.get_param("~aruco_tag_size_meters", ARUCO_TAG_SIZE_METERS_DEFAULT))
         self.aruco_dictionary_name = str(rospy.get_param("~aruco_dictionary", ARUCO_DICTIONARY_DEFAULT))
 
-        self.camera_matrix = np.array([
-            [float(rospy.get_param("~camera_fx", CAMERA_FX_DEFAULT)), 0.0, float(rospy.get_param("~camera_cx", CAMERA_CX_DEFAULT))],
-            [0.0, float(rospy.get_param("~camera_fy", CAMERA_FY_DEFAULT)), float(rospy.get_param("~camera_cy", CAMERA_CY_DEFAULT))],
-            [0.0, 0.0, 1.0]], dtype=np.float32)
+        # Pinhole model + distortion: needed so estimatePoseSingleMarkers gives tvec in meters in the camera frame.
+        self.camera_matrix = np.array(
+            [
+                [float(rospy.get_param("~camera_fx", CAMERA_FX_DEFAULT)), 0.0, float(rospy.get_param("~camera_cx", CAMERA_CX_DEFAULT))],
+                [0.0, float(rospy.get_param("~camera_fy", CAMERA_FY_DEFAULT)), float(rospy.get_param("~camera_cy", CAMERA_CY_DEFAULT))],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
 
-        self.dist_coeffs = np.array([
-            [float(rospy.get_param("~dist_k1", DIST_K1_DEFAULT))],
-            [float(rospy.get_param("~dist_k2", DIST_K2_DEFAULT))],
-            [float(rospy.get_param("~dist_p1", DIST_P1_DEFAULT))],
-            [float(rospy.get_param("~dist_p2", DIST_P2_DEFAULT))],
-            [float(rospy.get_param("~dist_k3", DIST_K3_DEFAULT))]], dtype=np.float32)
+        self.dist_coeffs = np.array(
+            [
+                [float(rospy.get_param("~dist_k1", DIST_K1_DEFAULT))],
+                [float(rospy.get_param("~dist_k2", DIST_K2_DEFAULT))],
+                [float(rospy.get_param("~dist_p1", DIST_P1_DEFAULT))],
+                [float(rospy.get_param("~dist_p2", DIST_P2_DEFAULT))],
+                [float(rospy.get_param("~dist_k3", DIST_K3_DEFAULT))],
+            ],
+            dtype=np.float32,
+        )
 
-        self.aruco_dictionary = _build_aruco_dictionary(self.aruco_dictionary_name)
-        self.aruco_parameters = _build_detector_parameters()
+        self.aruco_dictionary = build_aruco_dictionary(self.aruco_dictionary_name)
+        self.aruco_parameters = build_detector_parameters()
 
-        # A* Yol Araması (N0'dan N15'e) [cite: 44]
+        # Fixed assignment task: plan once from N0 to N15 on the given graph.
         path, cost = astar.astar_search(0, 15, verbose=True)
         if path is None:
             rospy.logfatal("A* found no path from N0 to N15.")
@@ -160,18 +133,20 @@ class Assignment3Navigator:
         self._path_cost: float = cost
 
         rospy.loginfo("A* path: %s", astar.format_path(self.path))
+        # Leg 0 would be "at start"; we begin by driving toward path[1] while standing near N0.
         self._leg = 1
         self._goal_done = False
         self._state = self.STATE_SEARCH
 
+        # Per-tag: latest (distance, yaw_error, stamp). Buffers debounce noise so one bad frame doesn't switch states.
         self._tag_metrics: Dict[int, Tuple[float, float, rospy.Time]] = {}
         self._last_camera_msg_time: Optional[rospy.Time] = None
         self._detection_buffer: Dict[int, int] = {}
         self._reach_buffer: Dict[int, int] = {}
-        self._search_sign = self._compute_search_sign(self._leg)
+        self._search_sign = compute_search_turn_sign(self.path, self._leg)
         self._last_yaw_err: Optional[float] = None
         self._pass_through_start_time: Optional[rospy.Time] = None
-        
+
         image_topic = rospy.get_param("~camera_image_topic", "/%s/camera_node/image/compressed" % self.robot_name)
         self._sub = rospy.Subscriber(image_topic, CompressedImage, self._on_camera_image, queue_size=1, buff_size=2 ** 24)
 
@@ -179,58 +154,35 @@ class Assignment3Navigator:
         self._pub = rospy.Publisher(cmd_topic, Twist2DStamped, queue_size=1)
         self.debug_pub = rospy.Publisher("/%s/debug_image/compressed" % self.robot_name, CompressedImage, queue_size=1)
 
+        # Control loop timing; camera callback runs async and only updates measurements.
         self._rate = rospy.Rate(20.0)
         rospy.on_shutdown(self._on_shutdown)
         rospy.sleep(0.3)
 
-    def _compute_search_sign(self, leg_idx: int) -> float:
-        """A* yol geometrisine göre dönüş yönünü belirler[cite: 44]."""
-        if leg_idx <= 0 or leg_idx >= len(self.path): return 0.0
-        current_node = self.path[leg_idx - 1]
-        target_node = self.path[leg_idx]
-        
-        nx = astar.COORDINATES[target_node][0] - astar.COORDINATES[current_node][0]
-        ny = astar.COORDINATES[target_node][1] - astar.COORDINATES[current_node][1]
-        
-        if leg_idx == 1: return 0.3 # Başlangıçta düz/hafif sola meyil
-        
-        prev_node = self.path[leg_idx - 2]
-        px = astar.COORDINATES[current_node][0] - astar.COORDINATES[prev_node][0]
-        py = astar.COORDINATES[current_node][1] - astar.COORDINATES[prev_node][1]
-        
-        cross = px * ny - py * nx
-        if cross > 0.1: return 1.0   # Sola dönüş
-        if cross < -0.1: return -1.0  # Sağa dönüş
-        return 0.3
-
-    def _draw_debug_overlay(self, frame, corners, ids, tvecs) -> np.ndarray:
-        debug = frame.copy()
-        target_node = self.path[self._leg] if self._leg < len(self.path) else -1
-        cv2.putText(debug, f"TARGET: N{target_node}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-        cv2.putText(debug, f"STATE: {self._state}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
-        return debug
-
     def _on_camera_image(self, msg: CompressedImage) -> None:
+        # Decode JPEG from Duckietown compressed image; stamp is used to drop stale ArUco measurements in the controller.
         stamp = msg.header.stamp if msg.header.stamp.to_sec() > 0 else rospy.Time.now()
         self._last_camera_msg_time = stamp
         np_image = np.frombuffer(msg.data, dtype=np.uint8)
         frame = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
-        if frame is None: return
+        if frame is None:
+            return
 
         frame = cv2.resize(frame, (640, 480))
-        corners, ids, _rejected = _detect_markers(frame, self.aruco_dictionary, self.aruco_parameters)
+        corners, ids, _rejected = detect_markers(frame, self.aruco_dictionary, self.aruco_parameters)
 
         metrics: Dict[int, Tuple[float, float, rospy.Time]] = {}
         if ids is not None and len(ids) > 0:
-            _rvecs, tvecs, _obj = cv2.aruco.estimatePoseSingleMarkers(corners, self.aruco_tag_size, self.camera_matrix, self.dist_coeffs)
+            _rvecs, tvecs, _obj = cv2.aruco.estimatePoseSingleMarkers(
+                corners, self.aruco_tag_size, self.camera_matrix, self.dist_coeffs
+            )
             flat_ids = ids.reshape(-1)
             for idx, tag_id in enumerate(flat_ids):
                 tx, ty, tz = [float(v) for v in tvecs[idx][0]]
-                dist = _norm3(tx, ty, tz)
-                yaw_off = _bearing_to_tag(tx, ty, tz)
+                dist = norm3(tx, ty, tz)
+                yaw_off = bearing_to_tag(tx, ty, tz)
                 metrics[int(tag_id)] = (dist, yaw_off, stamp)
-        
-        # Confirmation buffers
+
         target_node = self.path[self._leg] if self._leg < len(self.path) else -1
         for tag_id, (dist, _yaw, _st) in metrics.items():
             self._detection_buffer[tag_id] = self._detection_buffer.get(tag_id, 0) + 1
@@ -242,10 +194,13 @@ class Assignment3Navigator:
         for tag_id, data in metrics.items():
             self._tag_metrics[tag_id] = data
 
-        self.debug_pub.publish(msg) # Basitleştirilmiş yayın
+        # Still publishing the raw compressed image (overlay helper exists separately if we want to draw on it later).
+        self.debug_pub.publish(msg)
 
     def _compensate_right_turn(self, omega: float, *, search: bool = False) -> float:
-        if omega >= 0: return omega
+        # Our duckie turned weaker to the right in testing, so negative omega gets scaled up (more magnitude).
+        if omega >= 0:
+            return omega
         scale = self.search_right_scale if search else self.right_turn_scale
         return omega * float(scale)
 
@@ -260,6 +215,63 @@ class Assignment3Navigator:
     def _on_shutdown(self) -> None:
         self._publish_cmd(0.0, 0.0)
 
+    def _tick_pass_through(self, target_node: int, now: rospy.Time) -> bool:
+        # After we declare the node "reached", we keep driving straight briefly so the wheels actually leave the intersection.
+        if self._pass_through_start_time is None:
+            self._pass_through_start_time = now
+        if (now - self._pass_through_start_time).to_sec() >= self.pass_through_time:
+            self._advance_leg(target_node)
+            return True
+        self._publish_cmd(self.pass_through_speed, 0.0)
+        self._rate.sleep()
+        return True
+
+    def _tick_vision_control(self, target_node: int, now: rospy.Time) -> bool:
+        info = self._tag_metrics.get(target_node)
+        # "Fresh" means: we saw this tag recently, and we got enough consecutive frames to trust it (CONFIRM_FRAMES).
+        fresh = (
+            info
+            and (now - info[2]).to_sec() < self.detection_stale_sec
+            and self._detection_buffer.get(target_node, 0) >= CONFIRM_FRAMES
+        )
+        if not fresh:
+            self._state = self.STATE_SEARCH
+            magnitude = max(abs(self.search_omega), self.min_turn_omega)
+            # If we had a yaw error before losing the tag, keep spinning that way; else use the grid-based guess.
+            # Note: yaw_err == 0.0 is treated as "no memory" on purpose (matches our original behavior).
+            if self._last_yaw_err:
+                omega = math.copysign(magnitude, self._last_yaw_err)
+            else:
+                omega = math.copysign(magnitude, self._search_sign)
+            self._publish_cmd(self.search_linear_speed, self._compensate_right_turn(omega, search=True))
+            return False
+
+        dist, yaw_err = info[0], info[1]
+        self._last_yaw_err = yaw_err
+        yaw_cmd = yaw_err + self.yaw_bias
+
+        # "Reached" the node: close, facing well enough, and reach counter stable (REACH_CONFIRM_FRAMES).
+        if (
+            dist < self.proximity_threshold
+            and self._reach_buffer.get(target_node, 0) >= REACH_CONFIRM_FRAMES
+            and abs(yaw_cmd) < self.pass_through_align_threshold
+        ):
+            self._state = self.STATE_PASS_THROUGH
+            self._pass_through_start_time = None
+            # Skip the main loop sleep once here so PASS_THROUGH starts immediately (same timing as before refactor).
+            return True
+
+        if abs(yaw_cmd) > self.align_angle_max:
+            self._state = self.STATE_ALIGN
+            omega = self.angular_gain * yaw_cmd
+            if abs(omega) < self.min_turn_omega:
+                omega = math.copysign(self.min_turn_omega, yaw_cmd)
+            self._publish_cmd(self.align_linear_speed, self._compensate_right_turn(omega))
+        else:
+            self._state = self.STATE_APPROACH
+            self._publish_cmd(self.linear_speed, self._compensate_right_turn(self.angular_gain * yaw_cmd))
+        return False
+
     def run(self) -> None:
         while not rospy.is_shutdown() and not self._goal_done:
             if self._leg >= len(self.path):
@@ -268,56 +280,24 @@ class Assignment3Navigator:
 
             target_node = self.path[self._leg]
             now = rospy.Time.now()
-            
-            # PASS_THROUGH Mantığı
+
             if self._state == self.STATE_PASS_THROUGH:
-                if self._pass_through_start_time is None: self._pass_through_start_time = now
-                if (now - self._pass_through_start_time).to_sec() >= self.pass_through_time:
-                    self._advance_leg(target_node)
+                if self._tick_pass_through(target_node, now):
                     continue
-                else:
-                    self._publish_cmd(self.pass_through_speed, 0.0)
-                    self._rate.sleep()
-                    continue
-            
-            # Hedef Bilgisi Kontrolü
-            info = self._tag_metrics.get(target_node)
-            if info and (now - info[2]).to_sec() < self.detection_stale_sec and self._detection_buffer.get(target_node, 0) >= CONFIRM_FRAMES:
-                dist, yaw_err = info[0], info[1]
-                self._last_yaw_err = yaw_err
-                yaw_cmd = yaw_err + self.yaw_bias
-
-                if dist < self.proximity_threshold and self._reach_buffer.get(target_node, 0) >= REACH_CONFIRM_FRAMES and abs(yaw_cmd) < self.pass_through_align_threshold:
-                    self._state = self.STATE_PASS_THROUGH
-                    self._pass_through_start_time = None
-                    continue
-
-                if abs(yaw_cmd) > self.align_angle_max:
-                    self._state = self.STATE_ALIGN
-                    omega = self.angular_gain * yaw_cmd
-                    if abs(omega) < self.min_turn_omega: omega = math.copysign(self.min_turn_omega, yaw_cmd)
-                    self._publish_cmd(self.align_linear_speed, self._compensate_right_turn(omega))
-                else:
-                    self._state = self.STATE_APPROACH
-                    self._publish_cmd(self.linear_speed, self._compensate_right_turn(self.angular_gain * yaw_cmd))
-            else:
-                # Arama Durumu (Dönme burada gerçekleşir)
-                self._state = self.STATE_SEARCH
-                magnitude = max(abs(self.search_omega), self.min_turn_omega)
-                if self._last_yaw_err: omega = math.copysign(magnitude, self._last_yaw_err)
-                else: omega = math.copysign(magnitude, self._search_sign)
-                self._publish_cmd(self.search_linear_speed, self._compensate_right_turn(omega, search=True))
+            elif self._tick_vision_control(target_node, now):
+                continue
 
             self._rate.sleep()
 
     def _advance_leg(self, reached_node: int) -> None:
-        rospy.loginfo(f"Node N{reached_node} passed. Next leg.")
+        rospy.loginfo("Node N%d passed. Next leg.", reached_node)
         self._tag_metrics.pop(reached_node, None)
         self._detection_buffer, self._reach_buffer = {}, {}
         self._last_yaw_err = None
         self._leg += 1
         self._state = self.STATE_SEARCH
-        if self._leg < len(self.path): self._search_sign = self._compute_search_sign(self._leg)
+        if self._leg < len(self.path):
+            self._search_sign = compute_search_turn_sign(self.path, self._leg)
         self._publish_cmd(0, 0)
         rospy.sleep(0.1)
 
@@ -327,10 +307,12 @@ class Assignment3Navigator:
         rospy.loginfo("Goal Reached")
         rospy.signal_shutdown("goal_reached")
 
+
 def main() -> None:
     rospy.init_node("assignment3_navigator", anonymous=False)
     nav = Assignment3Navigator()
     nav.run()
+
 
 if __name__ == "__main__":
     main()
