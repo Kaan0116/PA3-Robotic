@@ -145,7 +145,7 @@ flowchart TD
     I -->|yes| L{Close, aligned, reach counter OK?}
     L -->|yes| M[Enter PASS_THROUGH, skip one sleep]
     M --> C
-    L -->|no| N{|yaw| > align_angle_max?}
+    L -->|no| N{yaw error exceeds align_angle_max?}
     N -->|yes| O[ALIGN: turn in place]
     N -->|no| P[APPROACH: forward + yaw correction]
     O --> K
