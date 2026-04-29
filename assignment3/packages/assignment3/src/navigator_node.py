@@ -270,11 +270,11 @@ class Assignment3Navigator:
 
             target = self.path[self._leg]
 
-            # 1. Stop motors and set the time boundary. _fresh_target will only
-            #    accept detections whose camera stamp is strictly after this
-            #    moment, guaranteeing every reading is truly post-action.
+            # 1. Stop motors and wait for a fresh detection. (Don't update
+            #    _last_action_time yet — we want to accept any detections that
+            #    arrived during the previous action, which may have brought the
+            #    next target into view.)
             self._publish_cmd(0.0, 0.0)
-            self._last_action_time = rospy.Time.now()
 
             # 2. Active wait: poll for up to step_pause_sec; return as soon as
             #    any fresh post-action detection is available.
@@ -282,11 +282,14 @@ class Assignment3Navigator:
             if rospy.is_shutdown():
                 return
 
-            # 3. Pick & execute exactly ONE atomic action.
+            # 3. Pick & execute exactly ONE atomic action. Set _last_action_time
+            #    RIGHT BEFORE the action so we exclude readings captured DURING
+            #    the move, but accept readings from before we started moving.
             if info is None:
                 sign = 1.0 if self._search_sign >= 0 else -1.0
                 rospy.loginfo("[N%d] SEARCH turn %+.0f deg (no detection in %.1fs)",
                               target, math.degrees(self.turn_step_rad) * sign, self.step_pause_sec)
+                self._last_action_time = rospy.Time.now()
                 self._turn_step(sign)
                 continue
 
@@ -295,6 +298,7 @@ class Assignment3Navigator:
                 sign = 1.0 if yaw > 0 else -1.0
                 rospy.loginfo("[N%d] ALIGN turn %+.0f deg (yaw=%.2frad dist=%.2fm)",
                               target, math.degrees(self.turn_step_rad) * sign, yaw, dist)
+                self._last_action_time = rospy.Time.now()
                 self._turn_step(sign)
                 continue
 
@@ -302,12 +306,14 @@ class Assignment3Navigator:
                 meters = max(0.0, dist - self.pass_through_distance_buffer)
                 rospy.loginfo("[N%d] PASS %.2fm (raw dist=%.2fm @ %.2fm/s)",
                               target, meters, dist, self.pass_through_speed)
+                self._last_action_time = rospy.Time.now()
                 self._drive_step(meters, self.pass_through_speed)
                 self._advance_leg(target)
                 continue
 
             rospy.loginfo("[N%d] APPROACH drive %.2fm (yaw=%.2frad dist=%.2fm)",
                           target, self.forward_step_m, yaw, dist)
+            self._last_action_time = rospy.Time.now()
             self._drive_step(self.forward_step_m, self.linear_speed)
 
     def _wait_for_target(self, target_id: int, max_wait_sec: float) -> Optional[Tuple[float, float]]:
@@ -330,11 +336,13 @@ class Assignment3Navigator:
 
     # -------------------------------------------------------- helpers
     def _fresh_target(self, target_id: int) -> Optional[Tuple[float, float]]:
-        """Latest post-action (dist, yaw_with_bias) for `target_id`, or None.
+        """Latest (dist, yaw_with_bias) for `target_id` captured AFTER the last action started.
 
-        A detection is accepted only when its camera timestamp is strictly
-        after _last_action_time (ensures it was captured after the robot
-        stopped moving) and within detection_stale_sec of now.
+        A detection is accepted when its camera timestamp is strictly after
+        _last_action_time (set right before each motion command) and within
+        detection_stale_sec of now. This excludes readings captured during
+        robot motion (blurry/unreliable) while accepting readings from before
+        the action started or after it finished.
         """
         info = self._tag_metrics.get(target_id)
         if info is None:
