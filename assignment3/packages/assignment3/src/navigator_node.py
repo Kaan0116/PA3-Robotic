@@ -36,6 +36,8 @@ PROXIMITY_THRESHOLD_DEFAULT = 0.45   # meters: "close" to tag for reach / pass-t
 ALIGN_ANGLE_MAX_DEFAULT = 0.20      # rad (~11°): above this |yaw| we use ALIGN not APPROACH
 SEARCH_ANGULAR_SPEED_DEFAULT = 1.3  # SEARCH state: spin rate magnitude
 SEARCH_LINEAR_SPEED_DEFAULT = 0.0   # SEARCH: 0 = pure spin; nonzero = crawl while searching
+SEARCH_TURN_STEP_DEG_DEFAULT = 30.0 # SEARCH: degrees per discrete turn before pausing
+SEARCH_WAIT_SEC_DEFAULT = 1.0       # SEARCH: pause duration between discrete turns (still detects)
 ALIGN_LINEAR_SPEED_DEFAULT = 0.0    # ALIGN: forward creep while turning (often 0)
 MAX_ANGULAR_SPEED_DEFAULT = 3.0     # clamp |omega| on every cmd
 DETECTION_STALE_SEC_DEFAULT = 1.0   # ArUco: drop measurements older than this
@@ -123,6 +125,8 @@ class Assignment3Navigator:
         self.align_angle_max = float(rospy.get_param("~align_angle_max", ALIGN_ANGLE_MAX_DEFAULT))
         self.search_omega = float(rospy.get_param("~search_angular_speed", SEARCH_ANGULAR_SPEED_DEFAULT))
         self.search_linear_speed = float(rospy.get_param("~search_linear_speed", SEARCH_LINEAR_SPEED_DEFAULT))
+        self.search_turn_step_rad = math.radians(float(rospy.get_param("~search_turn_step_deg", SEARCH_TURN_STEP_DEG_DEFAULT)))
+        self.search_wait_sec = float(rospy.get_param("~search_wait_sec", SEARCH_WAIT_SEC_DEFAULT))
         self.align_linear_speed = float(rospy.get_param("~align_linear_speed", ALIGN_LINEAR_SPEED_DEFAULT))
         self.max_omega = float(rospy.get_param("~max_angular_speed", MAX_ANGULAR_SPEED_DEFAULT))
         self.detection_stale_sec = float(rospy.get_param("~detection_stale_sec", DETECTION_STALE_SEC_DEFAULT))
@@ -179,6 +183,11 @@ class Assignment3Navigator:
         self._search_sign = self._compute_search_sign(self._leg)
         self._last_yaw_err: Optional[float] = None
         self._pass_through_start_time: Optional[rospy.Time] = None
+        # PASS_THROUGH: distance-based drive duration = last_dist / pass_through_speed
+        self._pass_through_duration: Optional[float] = None
+        # SEARCH: discrete-turn sub-state ("TURN" -> spin 30°, "WAIT" -> hold 1s & detect)
+        self._search_phase: str = "TURN"
+        self._search_phase_start: Optional[rospy.Time] = None
         
         # ROS subscriber: CompressedImage from duckie camera (JPEG bytes -> cv2)
         image_topic = rospy.get_param("~camera_image_topic", "/%s/camera_node/image/compressed" % self.robot_name)
@@ -288,10 +297,12 @@ class Assignment3Navigator:
             target_node = self.path[self._leg]
             now = rospy.Time.now()
             
-            # PASS_THROUGH: timed straight segment (omega=0), then A* leg advance
+            # PASS_THROUGH: distance-based straight segment (omega=0), then A* leg advance
+            # duration = measured_distance_to_tag / pass_through_speed (captured on transition)
             if self._state == self.STATE_PASS_THROUGH:
                 if self._pass_through_start_time is None: self._pass_through_start_time = now
-                if (now - self._pass_through_start_time).to_sec() >= self.pass_through_time:
+                duration = self._pass_through_duration if self._pass_through_duration is not None else self.pass_through_time
+                if (now - self._pass_through_start_time).to_sec() >= duration:
                     self._advance_leg(target_node)
                     continue
                 else:
@@ -310,6 +321,11 @@ class Assignment3Navigator:
                 if dist < self.proximity_threshold and self._reach_buffer.get(target_node, 0) >= REACH_CONFIRM_FRAMES and abs(yaw_cmd) < self.pass_through_align_threshold:
                     self._state = self.STATE_PASS_THROUGH
                     self._pass_through_start_time = None
+                    # latest measured tag distance / forward speed -> seconds of straight drive
+                    speed = max(abs(self.pass_through_speed), 1e-3)
+                    self._pass_through_duration = float(dist) / speed
+                    rospy.loginfo("PASS_THROUGH N%d: dist=%.2fm v=%.2fm/s -> %.2fs",
+                                  target_node, dist, self.pass_through_speed, self._pass_through_duration)
                     continue
 
                 # ALIGN: large |yaw_cmd| -> mostly rotate
@@ -323,12 +339,37 @@ class Assignment3Navigator:
                     self._state = self.STATE_APPROACH
                     self._publish_cmd(self.linear_speed, self._compensate_right_turn(self.angular_gain * yaw_cmd))
             else:
-                # SEARCH: no good ArUco on target — spin using last yaw or A* _search_sign
+                # SEARCH: no good ArUco on target — discrete 30° turn, then 1s wait (still detecting)
+                if self._state != self.STATE_SEARCH:
+                    self._search_phase = "TURN"
+                    self._search_phase_start = None
                 self._state = self.STATE_SEARCH
+
                 magnitude = max(abs(self.search_omega), self.min_turn_omega)
                 if self._last_yaw_err: omega = math.copysign(magnitude, self._last_yaw_err)
                 else: omega = math.copysign(magnitude, self._search_sign)
-                self._publish_cmd(self.search_linear_speed, self._compensate_right_turn(omega, search=True))
+                omega_cmd = self._compensate_right_turn(omega, search=True)
+
+                if self._search_phase_start is None:
+                    self._search_phase_start = now
+                elapsed = (now - self._search_phase_start).to_sec()
+
+                if self._search_phase == "TURN":
+                    # duration sized so the integrated rotation ≈ search_turn_step_rad
+                    turn_duration = self.search_turn_step_rad / max(abs(omega_cmd), 1e-3)
+                    if elapsed >= turn_duration:
+                        self._search_phase = "WAIT"
+                        self._search_phase_start = now
+                        self._publish_cmd(0.0, 0.0)
+                    else:
+                        self._publish_cmd(self.search_linear_speed, omega_cmd)
+                else:  # WAIT: hold still for ~search_wait_sec; ArUco callback keeps scanning
+                    if elapsed >= self.search_wait_sec:
+                        self._search_phase = "TURN"
+                        self._search_phase_start = now
+                        self._publish_cmd(self.search_linear_speed, omega_cmd)
+                    else:
+                        self._publish_cmd(0.0, 0.0)
 
             self._rate.sleep()
 
@@ -340,6 +381,9 @@ class Assignment3Navigator:
         self._last_yaw_err = None
         self._leg += 1
         self._state = self.STATE_SEARCH
+        self._search_phase = "TURN"
+        self._search_phase_start = None
+        self._pass_through_duration = None
         if self._leg < len(self.path): self._search_sign = self._compute_search_sign(self._leg)
         self._publish_cmd(0, 0)
         rospy.sleep(0.1)
